@@ -1,68 +1,104 @@
-from fastapi import FastAPI, Path, Query, Header, Cookie, HTTPException
-from pydantic import BaseModel, Field
-from typing import Optional, List
+from fastapi import FastAPI, Path, Query, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from sqlalchemy import create_engine, Column, Integer, String, Text
+from sqlalchemy.orm import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
+from pydantic import BaseModel
+from typing import List, Optional
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from datetime import datetime, timedelta
 
-app = FastAPI(title="Personal Blog API - Day 4")
+# --- CONFIGURATION ---
+SECRET_KEY = "your-super-secret-key" # Trong thực tế hãy để vào file .env
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-# --- 1. PYDANTIC MODELS (Data Validation) ---
-# Pydantic giúp kiểm soát dữ liệu đầu vào cực kỳ chặt chẽ
+# Kết nối SQLite
+SQLALCHEMY_DATABASE_URL = "sqlite:///./blog.db"
+engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# --- DATABASE MODELS ---
+class BlogModel(Base):
+    __tablename__ = "blogs"
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(100))
+    content = Column(Text)
+    author = Column(String(50))
+
+# Tạo bảng
+Base.metadata.create_all(bind=engine)
+
+# --- SECURITY UTILS ---
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+# --- SCHEMAS (Pydantic) ---
 class BlogPost(BaseModel):
-    id: int
-    title: str = Field(..., min_length=5, max_length=100, example="Học FastAPI trong 1 ngày")
-    content: str = Field(..., min_length=10)
-    author: str
-    tags: List[str] = []
-
-class BlogPostCreate(BaseModel):
     title: str
     content: str
     author: str
 
-# Giả lập cơ sở dữ liệu
-db_blogs = [
-    {"id": 1, "title": "Chào mừng đến với Blog", "content": "Đây là bài viết đầu tiên của tôi.", "author": "Hieu", "tags": ["hello", "first"]},
-]
+    model_config = {"from_attributes": True} # Cách viết mới của Pydantic V2
+
+# --- DEPENDENCY ---
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+app = FastAPI(title="Pro Blog API")
+
+# --- 1. AUTHENTICATION ENDPOINT ---
+@app.post("/login", tags=["Auth"])
+def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    # Giả lập check user (Thực tế nên có bảng Users)
+    if form_data.username == "admin" and form_data.password == "123456":
+        access_token = create_access_token(data={"sub": form_data.username})
+        return {"access_token": access_token, "token_type": "bearer"}
+    raise HTTPException(status_code=400, detail="Sai tài khoản hoặc mật khẩu")
 
 # --- 2. CRUD OPERATIONS ---
 
-# Lấy danh sách blog (Sử dụng Query Params)
-# Query Params: limit và search
-@app.get("/blogs", tags=["Blogs"])
-def get_blogs(
-    limit: int = Query(10, gt=0, le=100), 
-    search: Optional[str] = None
-):
-    results = db_blogs[:limit]
-    if search:
-        results = [b for b in results if search.lower() in b['title'].lower()]
-    return {"data": results, "total": len(results)}
+@app.get("/blogs", response_model=List[BlogPost], tags=["Blogs"])
+def read_blogs(db: Session = Depends(get_db)):
+    return db.query(BlogModel).all()
 
-# Lấy chi tiết một bài viết (Sử dụng Path Params)
-# Path Params: blog_id
-@app.get("/blogs/{blog_id}", tags=["Blogs"])
-def get_blog_detail(blog_id: int = Path(..., gt=0, description="ID của bài viết cần tìm")):
-    blog = next((b for b in db_blogs if b['id'] == blog_id), None)
-    if not blog:
-        raise HTTPException(status_code=404, detail="Không tìm thấy bài viết!")
-    return blog
+@app.post("/blogs", status_code=201, tags=["Blogs"])
+def create_blog(blog: BlogPost, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    # Chỉ ai có Token mới vào được đây
+    new_blog = BlogModel(**blog.dict())
+    db.add(new_blog)
+    db.commit()
+    db.refresh(new_blog)
+    return new_blog
 
-# Tạo bài viết mới (Data Validation với Pydantic)
-@app.post("/blogs", status_code=221, tags=["Blogs"])
-def create_blog(blog_data: BlogPostCreate):
-    new_id = len(db_blogs) + 1
-    new_blog = {"id": new_id, **blog_data.dict(), "tags": []}
-    db_blogs.append(new_blog)
-    return {"message": "Tạo bài viết thành công!", "blog": new_blog}
+# --- UPDATE (U) ---
+@app.put("/blogs/{blog_id}", tags=["Blogs"])
+def update_blog(blog_id: int, updated_data: BlogPost, db: Session = Depends(get_db)):
+    db_query = db.query(BlogModel).filter(BlogModel.id == blog_id)
+    if not db_query.first():
+        raise HTTPException(status_code=404, detail="Không tìm thấy bài viết")
+    db_query.update(updated_data.dict(), synchronize_session=False)
+    db.commit()
+    return {"message": "Cập nhật thành công"}
 
-# --- 3. ADVANCED: HEADER & COOKIE ---
-# Minh họa cách đọc Header và Cookie
-@app.get("/system/info")
-def get_system_info(
-    user_agent: Optional[str] = Header(None),
-    session_id: Optional[str] = Cookie(None)
-):
-    return {
-        "User-Agent": user_agent,
-        "Session-ID": session_id,
-        "Message": "Thông tin hệ thống được lấy từ Header và Cookie"
-    }
+# --- DELETE (D) ---
+@app.delete("/blogs/{blog_id}", tags=["Blogs"])
+def delete_blog(blog_id: int, db: Session = Depends(get_db)):
+    db_query = db.query(BlogModel).filter(BlogModel.id == blog_id)
+    if not db_query.first():
+        raise HTTPException(status_code=404, detail="Không tìm thấy bài viết")
+    db_query.delete(synchronize_session=False)
+    db.commit()
+    return {"message": "Đã xóa bài viết"}
