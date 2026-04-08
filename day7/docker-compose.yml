@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  # --- Dịch vụ Database ---
+  db:
+    image: postgres:15
+    container_name: postgres_db
+    environment:
+      POSTGRES_USER: hieu_user
+      POSTGRES_PASSWORD: hieu_password
+      POSTGRES_DB: hieu_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # --- Dịch vụ App FastAPI ---
+  web:
+    build: .
+    container_name: fastapi_app
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    environment:
+      # Khi chạy Docker, host của DB phải là tên service 'db'
+      DATABASE_URL: "postgresql+asyncpg://hieu_user:hieu_password@db:5432/hieu_db"
+      SECRET_KEY: "Hieu_Secret_Key_2026"
+      ALGORITHM: "HS256"
+
+volumes:
+  postgres_data:
